@@ -8,6 +8,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: milkcenter-erp-apk-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -382,17 +386,28 @@ jobs:
           echo "debug_mb=$DEBUG_MB" >> "$GITHUB_OUTPUT"
           echo "debug_sha256=$DEBUG_SHA256" >> "$GITHUB_OUTPUT"
 
-      # 8. Verify Debug APK
-      - name: Verify Debug APK Signature & Size
+      # 8. Verify Debug APK Signature, Package Name & Size
+      - name: Verify Debug APK Signature, Package Name & Size
         shell: bash
         run: |
           set -euo pipefail
           DEBUG_APK="${{ steps.build_debug.outputs.debug_apk_path }}"
+          EXPECTED_PKG="${{ steps.verify_firebase.outputs.application_id }}"
           APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
           if [ ! -x "$APKSIGNER" ]; then
             APKSIGNER=$(find "$ANDROID_HOME" -name apksigner 2>/dev/null | head -n 1 || true)
           fi
+          if [ ! -x "$AAPT2" ]; then
+            AAPT2=$(find "$ANDROID_HOME" -name aapt2 2>/dev/null | head -n 1 || true)
+          fi
           echo "Debug APK Size: ${{ steps.build_debug.outputs.debug_mb }} MB (${{ steps.build_debug.outputs.debug_bytes }} bytes)"
+          BADGING_LINE=$("$AAPT2" dump badging "$DEBUG_APK" | grep "^package:" || true)
+          echo "Debug APK Badging: $BADGING_LINE"
+          if [[ "$BADGING_LINE" != *"name='${EXPECTED_PKG}'"* ]]; then
+            echo "::error::Debug APK package name mismatch! Expected '${EXPECTED_PKG}', got: $BADGING_LINE"
+            exit 1
+          fi
           "$APKSIGNER" verify --verbose --print-certs "$DEBUG_APK"
 
       # 9. Build Signed Release APK
@@ -433,14 +448,17 @@ jobs:
           mkdir -p "$DIST_DIR"
           RELEASE_FILENAME="MilkCenter-ERP-${RELEASE_TAG}-release.apk"
           DEBUG_FILENAME="MilkCenter-ERP-${RELEASE_TAG}-debug.apk"
+          STABLE_RELEASE_FILENAME="MilkCenter-ERP-Release.apk"
           STABLE_DEBUG_FILENAME="MilkCenter-ERP-Debug.apk"
           SOURCE_ZIP_FILENAME="MilkCenter-ERP-SourceCode.zip"
           FINAL_RELEASE_APK="$DIST_DIR/$RELEASE_FILENAME"
           FINAL_DEBUG_APK="$DIST_DIR/$DEBUG_FILENAME"
+          STABLE_RELEASE_APK="$DIST_DIR/$STABLE_RELEASE_FILENAME"
           STABLE_DEBUG_APK="$DIST_DIR/$STABLE_DEBUG_FILENAME"
           SOURCE_ZIP_PATH="$DIST_DIR/$SOURCE_ZIP_FILENAME"
 
           cp "$RAW_RELEASE_APK" "$FINAL_RELEASE_APK"
+          cp "$RAW_RELEASE_APK" "$STABLE_RELEASE_APK"
           cp "${{ steps.build_debug.outputs.debug_apk_path }}" "$FINAL_DEBUG_APK"
           cp "${{ steps.build_debug.outputs.debug_apk_path }}" "$STABLE_DEBUG_APK"
 
@@ -475,10 +493,12 @@ jobs:
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "is_tag_ref=$IS_TAG_REF" >> "$GITHUB_OUTPUT"
           echo "release_apk_path=$FINAL_RELEASE_APK" >> "$GITHUB_OUTPUT"
+          echo "stable_release_apk_path=$STABLE_RELEASE_APK" >> "$GITHUB_OUTPUT"
           echo "debug_dist_apk_path=$FINAL_DEBUG_APK" >> "$GITHUB_OUTPUT"
           echo "stable_debug_apk_path=$STABLE_DEBUG_APK" >> "$GITHUB_OUTPUT"
           echo "source_zip_path=$SOURCE_ZIP_PATH" >> "$GITHUB_OUTPUT"
           echo "release_filename=$RELEASE_FILENAME" >> "$GITHUB_OUTPUT"
+          echo "stable_release_filename=$STABLE_RELEASE_FILENAME" >> "$GITHUB_OUTPUT"
           echo "debug_filename=$DEBUG_FILENAME" >> "$GITHUB_OUTPUT"
           echo "stable_debug_filename=$STABLE_DEBUG_FILENAME" >> "$GITHUB_OUTPUT"
           echo "source_zip_filename=$SOURCE_ZIP_FILENAME" >> "$GITHUB_OUTPUT"
@@ -487,16 +507,28 @@ jobs:
           echo "release_sha256=$REL_SHA256" >> "$GITHUB_OUTPUT"
           echo "source_zip_kb=$ZIP_KB" >> "$GITHUB_OUTPUT"
 
-      # 10. Verify Release APK Signature
-      - name: Verify Release APK Signature
+      # 10. Verify Release APK Signature & Package Name
+      - name: Verify Release APK Signature & Package Name
         shell: bash
         run: |
           set -euo pipefail
+          RELEASE_APK="${{ steps.build_release.outputs.release_apk_path }}"
+          EXPECTED_PKG="${{ steps.verify_firebase.outputs.application_id }}"
           APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
           if [ ! -x "$APKSIGNER" ]; then
             APKSIGNER=$(find "$ANDROID_HOME" -name apksigner 2>/dev/null | head -n 1 || true)
           fi
-          "$APKSIGNER" verify --verbose --print-certs "${{ steps.build_release.outputs.release_apk_path }}"
+          if [ ! -x "$AAPT2" ]; then
+            AAPT2=$(find "$ANDROID_HOME" -name aapt2 2>/dev/null | head -n 1 || true)
+          fi
+          BADGING_LINE=$("$AAPT2" dump badging "$RELEASE_APK" | grep "^package:" || true)
+          echo "Release APK Badging: $BADGING_LINE"
+          if [[ "$BADGING_LINE" != *"name='${EXPECTED_PKG}'"* ]]; then
+            echo "::error::Release APK package name mismatch! Expected '${EXPECTED_PKG}', got: $BADGING_LINE"
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "$RELEASE_APK"
 
       # 11. Upload Debug APK Artifact
       - name: Upload Debug APK Artifact
@@ -512,7 +544,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MilkCenter-ERP-Release-APK
-          path: ${{ steps.build_release.outputs.release_apk_path }}
+          path: ${{ steps.build_release.outputs.stable_release_apk_path }}
           retention-days: 30
           if-no-files-found: error
 
@@ -535,10 +567,12 @@ jobs:
           RELEASE_TAG="${{ steps.build_release.outputs.release_tag }}"
           IS_TAG_REF="${{ steps.build_release.outputs.is_tag_ref }}"
           REL_APK="${{ steps.build_release.outputs.release_apk_path }}"
+          STABLE_REL_APK="${{ steps.build_release.outputs.stable_release_apk_path }}"
           DBG_APK="${{ steps.build_release.outputs.debug_dist_apk_path }}"
           STABLE_DBG_APK="${{ steps.build_release.outputs.stable_debug_apk_path }}"
           SRC_ZIP="${{ steps.build_release.outputs.source_zip_path }}"
           REL_NAME="${{ steps.build_release.outputs.release_filename }}"
+          STABLE_REL_NAME="${{ steps.build_release.outputs.stable_release_filename }}"
           DBG_NAME="${{ steps.build_release.outputs.debug_filename }}"
           STABLE_DBG_NAME="${{ steps.build_release.outputs.stable_debug_filename }}"
           SRC_ZIP_NAME="${{ steps.build_release.outputs.source_zip_filename }}"
@@ -558,7 +592,7 @@ jobs:
           Connected to Firebase Project \`${FIREBASE_PID}\` (\`${APP_ID}\`).
 
           - **Debug APK (Direct):** \`${STABLE_DBG_NAME}\` (${DBG_MB} MB / ${DBG_BYTES} bytes)
-          - **Signed Release APK:** \`${REL_NAME}\` (${REL_MB} MB / ${REL_BYTES} bytes)
+          - **Signed Release APK (Direct):** \`${STABLE_REL_NAME}\` (${REL_MB} MB / ${REL_BYTES} bytes)
           - **Release SHA-256:** \`${REL_SHA256}\`
           - **Signing Mode:** ${RELEASE_SIGNING_MODE}
           - **Complete Source Code ZIP:** \`${SRC_ZIP_NAME}\` (${ZIP_KB} KB)
@@ -567,14 +601,14 @@ jobs:
           )
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$STABLE_DBG_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" --clobber
+            gh release upload "$RELEASE_TAG" "$STABLE_DBG_APK" "$STABLE_REL_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" --clobber
           else
             if [ "$IS_TAG_REF" = "true" ]; then
-              gh release create "$RELEASE_TAG" "$STABLE_DBG_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" \
+              gh release create "$RELEASE_TAG" "$STABLE_DBG_APK" "$STABLE_REL_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" \
                 --title "MilkCenter ERP ${RELEASE_TAG}" \
                 --notes "$RELEASE_NOTES"
             else
-              gh release create "$RELEASE_TAG" "$STABLE_DBG_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" \
+              gh release create "$RELEASE_TAG" "$STABLE_DBG_APK" "$STABLE_REL_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" \
                 --target "$GITHUB_SHA" \
                 --title "MilkCenter ERP ${RELEASE_TAG}" \
                 --notes "$RELEASE_NOTES"
@@ -583,11 +617,11 @@ jobs:
 
           RELEASE_PAGE_URL=$(gh release view "$RELEASE_TAG" --json url --jq '.url')
           STABLE_DBG_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$STABLE_DBG_NAME\") | .url" | head -n 1)
-          REL_DOWNLOAD_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$REL_NAME\") | .url" | head -n 1)
+          STABLE_REL_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$STABLE_REL_NAME\") | .url" | head -n 1)
           SRC_ZIP_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$SRC_ZIP_NAME\") | .url" | head -n 1)
 
           {
-            echo "### MilkCenter ERP — Verified Debug & Release APKs"
+            echo "### MilkCenter ERP — Verified Debug APK, Signed Release APK & Source Code ZIP"
             echo ""
             echo "| Detail | Value |"
             echo "| --- | --- |"
@@ -596,8 +630,8 @@ jobs:
             echo "| **Release Tag** | \`${RELEASE_TAG}\` |"
             echo "| **GitHub Release Page** | ${RELEASE_PAGE_URL} |"
             echo "| **Debug APK Download** | [${STABLE_DBG_NAME}](${STABLE_DBG_URL}) (${DBG_MB} MB) |"
-            echo "| **Signed Release APK** | [${REL_NAME}](${REL_DOWNLOAD_URL}) (${REL_MB} MB) |"
-            echo "| **Source Code ZIP** | [${SRC_ZIP_NAME}](${SRC_ZIP_URL}) (${ZIP_KB} KB) |"
+            echo "| **Signed Release APK Download** | [${STABLE_REL_NAME}](${STABLE_REL_URL}) (${REL_MB} MB) |"
+            echo "| **Source Code ZIP Download** | [${SRC_ZIP_NAME}](${SRC_ZIP_URL}) (${ZIP_KB} KB) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # 14. Always Clean Up Secret-Generated Files

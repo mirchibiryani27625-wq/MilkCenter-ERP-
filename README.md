@@ -39,12 +39,14 @@
 
 GitHub पर इस रिपॉजिटरी (`MilkCenter-ERP`) के `main` ब्रांच पर Push करने और GitHub Actions वर्कफ़्लो (`Build & Release MilkCenter ERP APK`) पूरा होने के बाद, **GitHub Releases** से सीधे डाउनलोड करें:
 
-1. **Android APK Install Download (Latest Release):**
-   - `https://github.com/<USERNAME>/MilkCenter-ERP/releases/latest/download/MilkCenter-ERP-Debug.apk`
-2. **Complete Source Code ZIP (Latest Release):**
-   - `https://github.com/<USERNAME>/MilkCenter-ERP/releases/latest/download/MilkCenter-ERP-SourceCode.zip`
+1. **Debug APK Install Download (Latest Release):**
+   - `https://github.com/mirchibiriyani27625-wq/MilkCenter-ERP/releases/latest/download/MilkCenter-ERP-Debug.apk`
+2. **Signed Release APK Install Download (Latest Release):**
+   - `https://github.com/mirchibiriyani27625-wq/MilkCenter-ERP/releases/latest/download/MilkCenter-ERP-Release.apk`
+3. **Complete Source Code ZIP (Latest Release):**
+   - `https://github.com/mirchibiriyani27625-wq/MilkCenter-ERP/releases/latest/download/MilkCenter-ERP-SourceCode.zip`
 
-> **नोट:** `<USERNAME>` की जगह अपना GitHub यूज़रनेम (जैसे `mirchibiriyani27625-wq`) उपयोग करें। आप **Actions → Build & Release MilkCenter ERP APK → Artifacts** से भी `MilkCenter-ERP-Debug-APK`, `MilkCenter-ERP-Release-APK`, और `MilkCenter-ERP-SourceCode` डाउनलोड कर सकते हैं।
+> **नोट:** आप **Actions → Build & Release MilkCenter ERP APK → Artifacts** से भी `MilkCenter-ERP-Debug-APK`, `MilkCenter-ERP-Release-APK`, और `MilkCenter-ERP-SourceCode` डाउनलोड कर सकते हैं।
 
 ---
 
