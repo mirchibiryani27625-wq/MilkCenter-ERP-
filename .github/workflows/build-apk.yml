@@ -1,0 +1,529 @@
+name: Build & Release MilkCenter ERP APK
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release-apk:
+    name: Build, Verify & Publish Debug + Release APKs
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout Repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. Setup JDK
+      - name: Setup JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # Setup Clean Android SDK
+      - name: Setup Clean Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f local.properties
+
+          CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/usr/local/lib/android' | paste -sd ':' -)
+          export PATH="$CLEAN_PATH"
+
+          SDK_DIR="${{ runner.temp }}/android-sdk"
+          ANDROID_USER_DIR="${{ runner.temp }}/.android"
+          rm -rf "$SDK_DIR" "$ANDROID_USER_DIR"
+          mkdir -p "$SDK_DIR/cmdline-tools" "$ANDROID_USER_DIR"
+
+          CMDLINE_URL=$(curl -fsSL https://developer.android.com/studio | grep -oE 'https://dl\.google\.com/android/repository/commandlinetools-linux-[0-9]+_latest\.zip' | head -n 1 || true)
+          if [ -z "$CMDLINE_URL" ]; then
+            CMDLINE_URL="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
+          fi
+          echo "Downloading Android Command-Line Tools from: $CMDLINE_URL"
+
+          TMP_ZIP="${{ runner.temp }}/commandlinetools.zip"
+          TMP_EXTRACT="${{ runner.temp }}/cmdline-extract"
+          rm -rf "$TMP_ZIP" "$TMP_EXTRACT"
+          curl -fSL "$CMDLINE_URL" -o "$TMP_ZIP"
+          unzip -q "$TMP_ZIP" -d "$TMP_EXTRACT"
+
+          if [ -d "$TMP_EXTRACT/cmdline-tools" ]; then
+            mv "$TMP_EXTRACT/cmdline-tools" "$SDK_DIR/cmdline-tools/latest"
+          elif [ -d "$TMP_EXTRACT/tools" ]; then
+            mv "$TMP_EXTRACT/tools" "$SDK_DIR/cmdline-tools/latest"
+          else
+            echo "::error::Unexpected archive layout inside $CMDLINE_URL"
+            exit 1
+          fi
+          rm -rf "$TMP_ZIP" "$TMP_EXTRACT"
+
+          export ANDROID_HOME="$SDK_DIR"
+          export ANDROID_SDK_ROOT="$SDK_DIR"
+          export ANDROID_USER_HOME="$ANDROID_USER_DIR"
+          SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          chmod +x "$SDKMANAGER"
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses >/dev/null 2>&1 || true
+          set -o pipefail
+
+          "$SDKMANAGER" --sdk_root="$SDK_DIR" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "platforms;android-36.1" \
+            "build-tools;36.0.0"
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses >/dev/null 2>&1 || true
+          set -o pipefail
+
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_USER_HOME=$ANDROID_USER_DIR" >> "$GITHUB_ENV"
+          echo "$SDK_DIR/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_DIR/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_DIR/build-tools/36.0.0" >> "$GITHUB_PATH"
+
+      # 3. Setup Gradle
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      # 4. Restore Firebase Configuration (Option A: GOOGLE_SERVICES_JSON_BASE64, Option B: GOOGLE_SERVICES_JSON, or existing file)
+      - name: Restore Firebase Configuration
+        env:
+          GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          GOOGLE_SERVICES_JSON_RAW: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_GS_JSON="app/google-services.json"
+
+          if [ -n "$GOOGLE_SERVICES_JSON_B64" ]; then
+            echo "Option A: Restoring app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret..."
+            python3 - <<'PY'
+          import base64, binascii, json, os, pathlib, re, sys
+          raw_b64 = os.environ.get("GOOGLE_SERVICES_JSON_B64", "").strip().strip('"').strip("'").strip()
+          if not raw_b64:
+              sys.exit("::error::GOOGLE_SERVICES_JSON_BASE64 secret is empty.")
+          if raw_b64.lstrip("\ufeff").startswith("{"):
+              decoded_text = raw_b64.lstrip("\ufeff").strip()
+          else:
+              compact_b64 = re.sub(r"\s+", "", raw_b64)
+              rem = len(compact_b64) % 4
+              if rem:
+                  compact_b64 += "=" * (4 - rem)
+              try:
+                  decoded_bytes = base64.b64decode(compact_b64, validate=True)
+              except binascii.Error:
+                  try:
+                      decoded_bytes = base64.urlsafe_b64decode(compact_b64)
+                  except Exception:
+                      sys.exit("::error::GOOGLE_SERVICES_JSON_BASE64 is not valid Base64.")
+              decoded_text = decoded_bytes.decode("utf-8-sig").strip()
+          parsed = json.loads(decoded_text)
+          if not isinstance(parsed, dict) or not parsed:
+              sys.exit("::error::Decoded GOOGLE_SERVICES_JSON_BASE64 JSON is empty or invalid.")
+          pathlib.Path("app/google-services.json").write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
+          print("Restored app/google-services.json from GOOGLE_SERVICES_JSON_BASE64.")
+          PY
+          elif [ -n "$GOOGLE_SERVICES_JSON_RAW" ]; then
+            echo "Option B: Restoring app/google-services.json from GOOGLE_SERVICES_JSON secret..."
+            python3 - <<'PY'
+          import json, os, pathlib, sys
+          raw_json = os.environ.get("GOOGLE_SERVICES_JSON_RAW", "").lstrip("\ufeff").strip()
+          if not raw_json:
+              sys.exit("::error::GOOGLE_SERVICES_JSON secret is empty.")
+          parsed = json.loads(raw_json)
+          if not isinstance(parsed, dict) or not parsed:
+              sys.exit("::error::GOOGLE_SERVICES_JSON is empty or invalid.")
+          pathlib.Path("app/google-services.json").write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
+          print("Restored app/google-services.json from GOOGLE_SERVICES_JSON.")
+          PY
+          elif [ -s "$TARGET_GS_JSON" ]; then
+            echo "Using existing app/google-services.json found in repository checkout."
+          else
+            echo "::error::Firebase Configuration Missing: app/google-services.json does not exist, and neither GOOGLE_SERVICES_JSON_BASE64 nor GOOGLE_SERVICES_JSON secret is configured."
+            echo "Solution: Add GOOGLE_SERVICES_JSON_BASE64 (base64 -w 0 app/google-services.json) or GOOGLE_SERVICES_JSON in Repository Settings -> Secrets and variables -> Actions for project 'milkcenter-erp'."
+            exit 1
+          fi
+
+      # 5. Verify Firebase Configuration
+      - name: Verify Firebase Configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, sys
+          gs_path = pathlib.Path("app/google-services.json")
+          if not gs_path.is_file() or gs_path.stat().st_size == 0:
+              sys.exit("::error::app/google-services.json is missing or empty.")
+
+          data = json.loads(gs_path.read_text(encoding="utf-8-sig"))
+          pinfo = data.get("project_info", {})
+          pid = pinfo.get("project_id", "")
+          pnum = str(pinfo.get("project_number", ""))
+          if pid != "milkcenter-erp":
+              sys.exit(f"::error::Firebase project_id mismatch: expected 'milkcenter-erp', got '{pid}'.")
+          if pnum != "281167762563":
+              sys.exit(f"::error::Firebase project_number mismatch: expected '281167762563', got '{pnum}'.")
+
+          gradle_text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
+          if "libs.plugins.google.services" not in gradle_text and "com.google.gms.google-services" not in gradle_text:
+              sys.exit("::error::Google Services Gradle plugin is not applied in app/build.gradle.kts.")
+
+          print(f"Verified app/google-services.json (project_id={pid}, project_number={pnum}) and Google Services Gradle plugin.")
+          PY
+
+      # 6. Verify Package Name
+      - name: Verify Package Name
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+          data = json.loads(pathlib.Path("app/google-services.json").read_text(encoding="utf-8-sig"))
+          expected_pkg = "Com.milk.Centre"
+
+          matched = None
+          for client in data.get("client", []):
+              if client.get("client_info", {}).get("android_client_info", {}).get("package_name") == expected_pkg:
+                  matched = client
+                  break
+          if not matched:
+              sys.exit(f"::error::No Firebase client entry found for '{expected_pkg}'.")
+
+          has_web_client = any(c.get("client_type") == 3 and c.get("client_id") for c in matched.get("oauth_client", []))
+          if not has_web_client:
+              sys.exit("::error::Web OAuth client (client_type == 3) missing; R.string.default_web_client_id will not be generated.")
+
+          gradle_text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
+          m = re.search(r'applicationId\s*=\s*"([^"]+)"', gradle_text)
+          app_id = m.group(1) if m else ""
+          if app_id != expected_pkg:
+              sys.exit(f"::error::Android applicationId mismatch: expected '{expected_pkg}', got '{app_id}'.")
+
+          print(f"Verified Firebase package_name matches applicationId ({app_id}) and Web OAuth client is present.")
+          PY
+
+      # Prepare Signing Keystores (never log secrets)
+      - name: Prepare Signing Keystores
+        env:
+          SECRET_KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore || rm -f debug.keystore
+          fi
+          if [ ! -s debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+          fi
+
+          if [ -n "$SECRET_KEYSTORE_B64" ] && [ -n "$SECRET_STORE_PASS" ] && [ -n "$SECRET_KEY_PASS" ]; then
+            echo "Using production release keystore from GitHub Secrets."
+            RELEASE_KS="${{ runner.temp }}/release-keystore.jks"
+            printf '%s' "$SECRET_KEYSTORE_B64" | tr -d '[:space:]' | base64 -d > "$RELEASE_KS"
+            echo "KEYSTORE_PATH=$RELEASE_KS" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$SECRET_STORE_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
+            echo "RELEASE_SIGNING_MODE=Repository Secrets (Production Keystore)" >> "$GITHUB_ENV"
+          elif [ -f "${{ github.workspace }}/my-upload-key.jks" ] && [ -n "$SECRET_STORE_PASS" ] && [ -n "$SECRET_KEY_PASS" ]; then
+            echo "Using repository upload keystore with GitHub Secret passwords."
+            echo "KEYSTORE_PATH=${{ github.workspace }}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$SECRET_STORE_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
+            echo "RELEASE_SIGNING_MODE=Repository Keystore + Secret Passwords" >> "$GITHUB_ENV"
+          else
+            echo "Release signing secrets not set; generating temporary RSA-2048 CI release keystore (alias: upload)."
+            CI_KS="${{ runner.temp }}/ci-release-keystore.jks"
+            CI_PASS="$(openssl rand -hex 16)"
+            echo "::add-mask::$CI_PASS"
+            rm -f "$CI_KS"
+            keytool -genkeypair -v \
+              -keystore "$CI_KS" \
+              -storetype PKCS12 \
+              -storepass "$CI_PASS" \
+              -alias upload \
+              -keypass "$CI_PASS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Namaste India Dairy Manager,OU=Android Release,O=Namaste India,C=IN" >/dev/null 2>&1
+            echo "KEYSTORE_PATH=$CI_KS" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
+            echo "RELEASE_SIGNING_MODE=CI-Generated Release Keystore (set KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD secrets for Play Store continuity)" >> "$GITHUB_ENV"
+          fi
+
+      # Run Unit Tests
+      - name: Run Unit & Robolectric Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_CMD="gradle"
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
+          fi
+          "$GRADLE_CMD" :app:testDebugUnitTest --no-daemon
+
+      # 7. Build Debug APK
+      - name: Build Debug APK
+        id: build_debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_CMD="gradle"
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
+          fi
+          "$GRADLE_CMD" :app:processDebugGoogleServices :app:compileDebugKotlin assembleDebug --no-daemon
+
+          GS_VALUES="app/build/generated/res/processDebugGoogleServices/values/values.xml"
+          if [ ! -f "$GS_VALUES" ] || ! grep -q 'name="default_web_client_id"' "$GS_VALUES"; then
+            echo "::error::R.string.default_web_client_id was not generated in $GS_VALUES"
+            exit 1
+          fi
+
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$DEBUG_APK" ] || [ ! -s "$DEBUG_APK" ]; then
+            echo "::error::Expected Debug APK not found or empty at $DEBUG_APK"
+            exit 1
+          fi
+
+          DEBUG_BYTES=$(stat -c%s "$DEBUG_APK")
+          DEBUG_MB=$(awk "BEGIN {printf \"%.2f\", $DEBUG_BYTES / 1048576}")
+          DEBUG_SHA256=$(sha256sum "$DEBUG_APK" | awk '{print $1}')
+
+          echo "debug_apk_path=$DEBUG_APK" >> "$GITHUB_OUTPUT"
+          echo "debug_bytes=$DEBUG_BYTES" >> "$GITHUB_OUTPUT"
+          echo "debug_mb=$DEBUG_MB" >> "$GITHUB_OUTPUT"
+          echo "debug_sha256=$DEBUG_SHA256" >> "$GITHUB_OUTPUT"
+
+      # 8. Verify Debug APK
+      - name: Verify Debug APK Signature & Size
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEBUG_APK="${{ steps.build_debug.outputs.debug_apk_path }}"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            APKSIGNER=$(find "$ANDROID_HOME" -name apksigner 2>/dev/null | head -n 1 || true)
+          fi
+          echo "Debug APK Size: ${{ steps.build_debug.outputs.debug_mb }} MB (${{ steps.build_debug.outputs.debug_bytes }} bytes)"
+          "$APKSIGNER" verify --verbose --print-certs "$DEBUG_APK"
+
+      # 9. Build Signed Release APK
+      - name: Build Signed Release APK
+        id: build_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_CMD="gradle"
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
+          fi
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            IS_TAG_REF="true"
+          else
+            RELEASE_TAG="v1.0.${GITHUB_RUN_NUMBER}"
+            IS_TAG_REF="false"
+          fi
+
+          "$GRADLE_CMD" assembleRelease --no-daemon
+
+          RAW_RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$RAW_RELEASE_APK" ] || [ ! -s "$RAW_RELEASE_APK" ]; then
+            echo "::error::Expected signed Release APK not found or empty at $RAW_RELEASE_APK"
+            exit 1
+          fi
+
+          DIST_DIR="${{ runner.temp }}/release-dist"
+          mkdir -p "$DIST_DIR"
+          RELEASE_FILENAME="MilkCenter-ERP-${RELEASE_TAG}-release.apk"
+          DEBUG_FILENAME="MilkCenter-ERP-${RELEASE_TAG}-debug.apk"
+          STABLE_DEBUG_FILENAME="MilkCenter-ERP-Debug.apk"
+          SOURCE_ZIP_FILENAME="MilkCenter-ERP-SourceCode.zip"
+          FINAL_RELEASE_APK="$DIST_DIR/$RELEASE_FILENAME"
+          FINAL_DEBUG_APK="$DIST_DIR/$DEBUG_FILENAME"
+          STABLE_DEBUG_APK="$DIST_DIR/$STABLE_DEBUG_FILENAME"
+          SOURCE_ZIP_PATH="$DIST_DIR/$SOURCE_ZIP_FILENAME"
+
+          cp "$RAW_RELEASE_APK" "$FINAL_RELEASE_APK"
+          cp "${{ steps.build_debug.outputs.debug_apk_path }}" "$FINAL_DEBUG_APK"
+          cp "${{ steps.build_debug.outputs.debug_apk_path }}" "$STABLE_DEBUG_APK"
+
+          python3 - <<PY
+          import os, zipfile
+          out_zip = r"$SOURCE_ZIP_PATH"
+          exclude_dirs = {".git", ".gradle", ".kotlin", "build", ".build-outputs", ".aistudio", "public", "node_modules"}
+          exclude_files = {"local.properties", ".env", "debug.keystore", "google-services.json"}
+          with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+              for dirpath, dirnames, filenames in os.walk("."):
+                  rel_dir = os.path.relpath(dirpath, ".")
+                  parts = [] if rel_dir == "." else rel_dir.split(os.sep)
+                  dirnames[:] = [
+                      d for d in sorted(dirnames)
+                      if d not in exclude_dirs and not (parts == ["app"] and d == "build")
+                  ]
+                  for f in sorted(filenames):
+                      if f in exclude_files:
+                          continue
+                      full_path = os.path.join(dirpath, f)
+                      zf.write(full_path, os.path.relpath(full_path, "."))
+          PY
+
+          REL_BYTES=$(stat -c%s "$FINAL_RELEASE_APK")
+          REL_MB=$(awk "BEGIN {printf \"%.2f\", $REL_BYTES / 1048576}")
+          REL_SHA256=$(sha256sum "$FINAL_RELEASE_APK" | awk '{print $1}')
+          ZIP_BYTES=$(stat -c%s "$SOURCE_ZIP_PATH")
+          ZIP_KB=$(awk "BEGIN {printf \"%.1f\", $ZIP_BYTES / 1024}")
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "is_tag_ref=$IS_TAG_REF" >> "$GITHUB_OUTPUT"
+          echo "release_apk_path=$FINAL_RELEASE_APK" >> "$GITHUB_OUTPUT"
+          echo "debug_dist_apk_path=$FINAL_DEBUG_APK" >> "$GITHUB_OUTPUT"
+          echo "stable_debug_apk_path=$STABLE_DEBUG_APK" >> "$GITHUB_OUTPUT"
+          echo "source_zip_path=$SOURCE_ZIP_PATH" >> "$GITHUB_OUTPUT"
+          echo "release_filename=$RELEASE_FILENAME" >> "$GITHUB_OUTPUT"
+          echo "debug_filename=$DEBUG_FILENAME" >> "$GITHUB_OUTPUT"
+          echo "stable_debug_filename=$STABLE_DEBUG_FILENAME" >> "$GITHUB_OUTPUT"
+          echo "source_zip_filename=$SOURCE_ZIP_FILENAME" >> "$GITHUB_OUTPUT"
+          echo "release_bytes=$REL_BYTES" >> "$GITHUB_OUTPUT"
+          echo "release_mb=$REL_MB" >> "$GITHUB_OUTPUT"
+          echo "release_sha256=$REL_SHA256" >> "$GITHUB_OUTPUT"
+          echo "source_zip_kb=$ZIP_KB" >> "$GITHUB_OUTPUT"
+
+      # 10. Verify Release APK Signature
+      - name: Verify Release APK Signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            APKSIGNER=$(find "$ANDROID_HOME" -name apksigner 2>/dev/null | head -n 1 || true)
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "${{ steps.build_release.outputs.release_apk_path }}"
+
+      # 11. Upload Debug APK Artifact
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MilkCenter-ERP-Debug-APK
+          path: ${{ steps.build_release.outputs.stable_debug_apk_path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # 12. Upload Release APK Artifact
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MilkCenter-ERP-Release-APK
+          path: ${{ steps.build_release.outputs.release_apk_path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # 12b. Upload Source Code ZIP Artifact
+      - name: Upload Source Code ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MilkCenter-ERP-SourceCode
+          path: ${{ steps.build_release.outputs.source_zip_path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # 13. Publish GitHub Release
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="${{ steps.build_release.outputs.release_tag }}"
+          IS_TAG_REF="${{ steps.build_release.outputs.is_tag_ref }}"
+          REL_APK="${{ steps.build_release.outputs.release_apk_path }}"
+          DBG_APK="${{ steps.build_release.outputs.debug_dist_apk_path }}"
+          STABLE_DBG_APK="${{ steps.build_release.outputs.stable_debug_apk_path }}"
+          SRC_ZIP="${{ steps.build_release.outputs.source_zip_path }}"
+          REL_NAME="${{ steps.build_release.outputs.release_filename }}"
+          DBG_NAME="${{ steps.build_release.outputs.debug_filename }}"
+          STABLE_DBG_NAME="${{ steps.build_release.outputs.stable_debug_filename }}"
+          SRC_ZIP_NAME="${{ steps.build_release.outputs.source_zip_filename }}"
+          REL_MB="${{ steps.build_release.outputs.release_mb }}"
+          REL_BYTES="${{ steps.build_release.outputs.release_bytes }}"
+          REL_SHA256="${{ steps.build_release.outputs.release_sha256 }}"
+          DBG_MB="${{ steps.build_debug.outputs.debug_mb }}"
+          DBG_BYTES="${{ steps.build_debug.outputs.debug_bytes }}"
+          ZIP_KB="${{ steps.build_release.outputs.source_zip_kb }}"
+
+          RELEASE_NOTES=$(cat <<EOF
+          ## MilkCenter ERP (${RELEASE_TAG})
+
+          Connected to Firebase Project \`milkcenter-erp\` (\`Com.milk.Centre\`).
+
+          - **Debug APK (Direct):** \`${STABLE_DBG_NAME}\` (${DBG_MB} MB / ${DBG_BYTES} bytes)
+          - **Signed Release APK:** \`${REL_NAME}\` (${REL_MB} MB / ${REL_BYTES} bytes)
+          - **Release SHA-256:** \`${REL_SHA256}\`
+          - **Signing Mode:** ${RELEASE_SIGNING_MODE}
+          - **Complete Source Code ZIP:** \`${SRC_ZIP_NAME}\` (${ZIP_KB} KB)
+          - **Commit:** \`${GITHUB_SHA}\`
+          EOF
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$STABLE_DBG_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" --clobber
+          else
+            if [ "$IS_TAG_REF" = "true" ]; then
+              gh release create "$RELEASE_TAG" "$STABLE_DBG_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" \
+                --title "MilkCenter ERP ${RELEASE_TAG}" \
+                --notes "$RELEASE_NOTES"
+            else
+              gh release create "$RELEASE_TAG" "$STABLE_DBG_APK" "$SRC_ZIP" "$REL_APK" "$DBG_APK" \
+                --target "$GITHUB_SHA" \
+                --title "MilkCenter ERP ${RELEASE_TAG}" \
+                --notes "$RELEASE_NOTES"
+            fi
+          fi
+
+          RELEASE_PAGE_URL=$(gh release view "$RELEASE_TAG" --json url --jq '.url')
+          STABLE_DBG_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$STABLE_DBG_NAME\") | .url" | head -n 1)
+          REL_DOWNLOAD_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$REL_NAME\") | .url" | head -n 1)
+          SRC_ZIP_URL=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$SRC_ZIP_NAME\") | .url" | head -n 1)
+
+          {
+            echo "### MilkCenter ERP — Verified Debug & Release APKs"
+            echo ""
+            echo "| Detail | Value |"
+            echo "| --- | --- |"
+            echo "| **Firebase Project** | \`milkcenter-erp\` |"
+            echo "| **Application ID** | \`Com.milk.Centre\` |"
+            echo "| **Release Tag** | \`${RELEASE_TAG}\` |"
+            echo "| **GitHub Release Page** | ${RELEASE_PAGE_URL} |"
+            echo "| **Debug APK Download** | [${STABLE_DBG_NAME}](${STABLE_DBG_URL}) (${DBG_MB} MB) |"
+            echo "| **Signed Release APK** | [${REL_NAME}](${REL_DOWNLOAD_URL}) (${REL_MB} MB) |"
+            echo "| **Source Code ZIP** | [${SRC_ZIP_NAME}](${SRC_ZIP_URL}) (${ZIP_KB} KB) |"
+          } >> "$GITHUB_STEP_SUMMARY"

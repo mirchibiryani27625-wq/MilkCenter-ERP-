@@ -1,0 +1,6 @@
+{
+  "name": "Namaste India Dairy Manager",
+  "description": "नमस्ते इंडिया दूध संग्रहण केंद्र, तुर्की (NI-TURKI-01) - Complete Dairy Management ERP App with AI Smart Camera Scanner, Rate Charts, Farmer Accounts, and WhatsApp Billing",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

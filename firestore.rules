@@ -1,0 +1,538 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Core Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isNum(v) {
+      return v is int || v is float;
+    }
+
+    function isValidTimestampsCreate(data) {
+      return data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTimestampsUpdate(data) {
+      return data.createdAt == existing().createdAt &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isTokenAdmin() {
+      return isSignedIn() &&
+             'email_verified' in request.auth.token &&
+             request.auth.token.email_verified == true &&
+             'email' in request.auth.token &&
+             request.auth.token.email in ['mirchibiryani27625@gmail.com'];
+    }
+
+    function isAdmin() {
+      return isTokenAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/Users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/Users/$(request.auth.uid)).data.role == 'ADMIN' &&
+        get(/databases/$(database)/documents/Users/$(request.auth.uid)).data.isActive == true
+      );
+    }
+
+    // --- Domain Validation Helpers ---
+    function isValidUser(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.email is string && data.email.size() <= 200 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+             data.role in ['ADMIN', 'OPERATOR', 'STAFF'] &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.isActive is bool &&
+             data.photoUrl is string && data.photoUrl.size() <= 1000 &&
+             data.lastLoginAt is timestamp && data.lastLoginAt <= request.time &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidFarmer(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.farmerId is string && data.farmerId.size() >= 1 && data.farmerId.size() <= 64 &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+             data.mobileNumber is string && data.mobileNumber.size() <= 32 &&
+             data.villageAddress is string && data.villageAddress.size() <= 250 &&
+             data.milkCategory in ['COW', 'BUFFALO'] &&
+             data.photoUrl is string && data.photoUrl.size() <= 1000 &&
+             data.bankName is string && data.bankName.size() <= 120 &&
+             data.accountHolderName is string && data.accountHolderName.size() <= 120 &&
+             data.accountNumber is string && data.accountNumber.size() <= 64 &&
+             data.ifscCode is string && data.ifscCode.size() <= 32;
+    }
+
+    function isValidMilkCollection(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.receiptNumber is string && data.receiptNumber.size() >= 1 && data.receiptNumber.size() <= 80 &&
+             data.date is string && data.date.size() >= 8 && data.date.size() <= 20 &&
+             data.shift in ['MORNING', 'EVENING'] &&
+             data.farmerId is string && data.farmerId.size() >= 1 && data.farmerId.size() <= 64 &&
+             data.farmerName is string && data.farmerName.size() <= 120 &&
+             data.milkCategory in ['COW', 'BUFFALO'] &&
+             isNum(data.quantity) && data.quantity >= 0 && data.quantity <= 100000 &&
+             isNum(data.fat) && data.fat >= 0 && data.fat <= 25 &&
+             isNum(data.snf) && data.snf >= 0 && data.snf <= 25 &&
+             isNum(data.waterPercentage) && data.waterPercentage >= 0 && data.waterPercentage <= 100 &&
+             isNum(data.rate) && data.rate >= 0 && data.rate <= 1000 &&
+             isNum(data.totalAmount) && data.totalAmount >= 0 && data.totalAmount <= 10000000 &&
+             isNum(data.machineAmount) && data.machineAmount >= 0 && data.machineAmount <= 10000000 &&
+             data.scannedImageUrl is string && data.scannedImageUrl.size() <= 1000 &&
+             data.ocrScanned is bool &&
+             isNum(data.ocrConfidence) && data.ocrConfidence >= 0 && data.ocrConfidence <= 100 &&
+             data.machineNumber is string && data.machineNumber.size() <= 64 &&
+             data.actualTime is string && data.actualTime.size() <= 32 &&
+             data.transactionId is string && data.transactionId.size() <= 80 &&
+             data.scanRecordId is string && data.scanRecordId.size() <= 80 &&
+             data.verifiedBy is string && data.verifiedBy.size() <= 120 &&
+             isNum(data.month) && data.month >= 0 && data.month <= 12 &&
+             isNum(data.year) && data.year >= 0 && data.year <= 2100 &&
+             data.sourceType is string && data.sourceType.size() <= 40 &&
+             data.verificationStatus is string && data.verificationStatus.size() <= 40 &&
+             isNum(data.timestampMillis) && data.timestampMillis >= 0;
+    }
+
+    function isValidMilkRate(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.category in ['COW', 'BUFFALO'] &&
+             isNum(data.baseRate) && data.baseRate >= 0 && data.baseRate <= 500 &&
+             isNum(data.baseFat) && data.baseFat >= 0 && data.baseFat <= 20 &&
+             isNum(data.fatMultiplier) && data.fatMultiplier >= 0 && data.fatMultiplier <= 100 &&
+             isNum(data.baseSnf) && data.baseSnf >= 0 && data.baseSnf <= 20 &&
+             isNum(data.snfMultiplier) && data.snfMultiplier >= 0 && data.snfMultiplier <= 100 &&
+             isNum(data.waterDeductionPerPercent) && data.waterDeductionPerPercent >= 0 && data.waterDeductionPerPercent <= 100;
+    }
+
+    function isValidPayment(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.transactionId is string && data.transactionId.size() >= 1 && data.transactionId.size() <= 80 &&
+             data.farmerId is string && data.farmerId.size() >= 1 && data.farmerId.size() <= 64 &&
+             data.farmerName is string && data.farmerName.size() >= 1 && data.farmerName.size() <= 120 &&
+             isNum(data.paymentAmount) && data.paymentAmount > 0 && data.paymentAmount <= 10000000 &&
+             data.paymentDate is string && data.paymentDate.size() >= 8 && data.paymentDate.size() <= 20 &&
+             data.paymentMode in ['CASH', 'UPI', 'BANK TRANSFER'] &&
+             data.paymentType in ['WEEKLY', 'ADVANCE', 'PARTIAL', 'FULL'] &&
+             data.note is string && data.note.size() <= 300 &&
+             isNum(data.previousBalance) &&
+             isNum(data.finalBalance) &&
+             isNum(data.timestampMillis) && data.timestampMillis >= 0;
+    }
+
+    function isValidExpense(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.expenseId is string && data.expenseId.size() >= 1 && data.expenseId.size() <= 80 &&
+             data.title is string && data.title.size() >= 2 && data.title.size() <= 150 &&
+             data.category in ['ELECTRICITY', 'SALARY', 'MAINTENANCE', 'CATTLE_FEED', 'OTHER'] &&
+             isNum(data.amount) && data.amount > 0 && data.amount <= 10000000 &&
+             data.date is string && data.date.size() >= 8 && data.date.size() <= 20 &&
+             data.paymentMode in ['CASH', 'UPI', 'BANK TRANSFER'] &&
+             data.note is string && data.note.size() <= 300 &&
+             data.recordedBy is string && data.recordedBy.size() <= 120 &&
+             isNum(data.timestampMillis) && data.timestampMillis >= 0;
+    }
+
+    function isValidDailyReport(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.date is string && data.date.size() >= 8 && data.date.size() <= 20 &&
+             isNum(data.totalWeight) && data.totalWeight >= 0 &&
+             isNum(data.totalAmount) && data.totalAmount >= 0 &&
+             isNum(data.morningWeight) && data.morningWeight >= 0 &&
+             isNum(data.eveningWeight) && data.eveningWeight >= 0 &&
+             isNum(data.avgFat) && data.avgFat >= 0 && data.avgFat <= 25 &&
+             isNum(data.avgSnf) && data.avgSnf >= 0 && data.avgSnf <= 25 &&
+             isNum(data.entriesCount) && data.entriesCount >= 0 &&
+             isNum(data.totalPaid) && data.totalPaid >= 0 &&
+             isNum(data.totalExpenses) && data.totalExpenses >= 0;
+    }
+
+    function isValidMonthlyReport(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.yearMonth is string && data.yearMonth.size() >= 6 && data.yearMonth.size() <= 10 &&
+             isNum(data.year) && data.year >= 2000 && data.year <= 2100 &&
+             isNum(data.month) && data.month >= 1 && data.month <= 12 &&
+             isNum(data.totalWeight) && data.totalWeight >= 0 &&
+             isNum(data.totalAmount) && data.totalAmount >= 0 &&
+             isNum(data.cowWeight) && data.cowWeight >= 0 &&
+             isNum(data.buffaloWeight) && data.buffaloWeight >= 0 &&
+             isNum(data.entriesCount) && data.entriesCount >= 0 &&
+             isNum(data.totalPaid) && data.totalPaid >= 0 &&
+             isNum(data.totalExpenses) && data.totalExpenses >= 0;
+    }
+
+    function isValidSettings(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.dairyName is string && data.dairyName.size() >= 1 && data.dairyName.size() <= 120 &&
+             data.centerName is string && data.centerName.size() >= 1 && data.centerName.size() <= 150 &&
+             data.address is string && data.address.size() <= 250 &&
+             data.contactNumber is string && data.contactNumber.size() <= 32 &&
+             isNum(data.morningStartHour) && data.morningStartHour >= 0 && data.morningStartHour <= 23 &&
+             isNum(data.morningStartMinute) && data.morningStartMinute >= 0 && data.morningStartMinute <= 59 &&
+             isNum(data.morningEndHour) && data.morningEndHour >= 0 && data.morningEndHour <= 23 &&
+             isNum(data.morningEndMinute) && data.morningEndMinute >= 0 && data.morningEndMinute <= 59 &&
+             isNum(data.eveningStartHour) && data.eveningStartHour >= 0 && data.eveningStartHour <= 23 &&
+             isNum(data.eveningStartMinute) && data.eveningStartMinute >= 0 && data.eveningStartMinute <= 59 &&
+             isNum(data.eveningEndHour) && data.eveningEndHour >= 0 && data.eveningEndHour <= 23 &&
+             isNum(data.eveningEndMinute) && data.eveningEndMinute >= 0 && data.eveningEndMinute <= 59 &&
+             isNum(data.amountToleranceRs) && data.amountToleranceRs >= 0 && data.amountToleranceRs <= 100;
+    }
+
+    function isValidNotification(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 &&
+             data.notificationId is string && data.notificationId.size() >= 1 && data.notificationId.size() <= 80 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.message is string && data.message.size() >= 1 && data.message.size() <= 400 &&
+             data.type is string && data.type.size() >= 1 && data.type.size() <= 32 &&
+             data.read is bool &&
+             isNum(data.timestampMillis) && data.timestampMillis >= 0;
+    }
+
+    // 1. Users Collection (Private PII + Role-Based Admin Access)
+    match /Users/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (docId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       docId == request.auth.uid &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'email', 'displayName', 'role', 'stationId', 'isActive', 'photoUrl', 'lastLoginAt', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'email', 'displayName', 'role', 'stationId', 'isActive', 'photoUrl', 'lastLoginAt', 'createdAt', 'updatedAt']) &&
+                       incoming().isActive == true &&
+                       (incoming().role in ['OPERATOR', 'STAFF'] || (incoming().role == 'ADMIN' && isTokenAdmin())) &&
+                       isValidUser(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       isValidUser(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'isActive', 'displayName', 'email', 'photoUrl', 'stationId', 'lastLoginAt', 'updatedAt'])) ||
+                         (docId == request.auth.uid &&
+                          incoming().role == existing().role &&
+                          incoming().isActive == existing().isActive &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoUrl', 'stationId', 'lastLoginAt', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 2. Farmers Collection
+    match /Farmers/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'farmerId', 'fullName', 'mobileNumber', 'villageAddress', 'milkCategory', 'photoUrl', 'bankName', 'accountHolderName', 'accountNumber', 'ifscCode', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'farmerId', 'fullName', 'mobileNumber', 'villageAddress', 'milkCategory', 'photoUrl', 'bankName', 'accountHolderName', 'accountNumber', 'ifscCode', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidFarmer(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidFarmer(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().farmerId == existing().farmerId &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'fullName', 'mobileNumber', 'villageAddress', 'milkCategory', 'photoUrl', 'bankName', 'accountHolderName', 'accountNumber', 'ifscCode', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 3. MilkCollection Collection
+    match /MilkCollection/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'receiptNumber', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'transactionId', 'scanRecordId', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'receiptNumber', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'transactionId', 'scanRecordId', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidMilkCollection(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidMilkCollection(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().receiptNumber == existing().receiptNumber &&
+                       incoming().timestampMillis == existing().timestampMillis &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 4. MorningShift Collection
+    match /MorningShift/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().shift == 'MORNING' &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'receiptNumber', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'transactionId', 'scanRecordId', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'receiptNumber', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'transactionId', 'scanRecordId', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidMilkCollection(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       incoming().shift == 'MORNING' &&
+                       isValidMilkCollection(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().receiptNumber == existing().receiptNumber &&
+                       incoming().timestampMillis == existing().timestampMillis &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 5. EveningShift Collection
+    match /EveningShift/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().shift == 'EVENING' &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'receiptNumber', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'transactionId', 'scanRecordId', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'receiptNumber', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'transactionId', 'scanRecordId', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidMilkCollection(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       incoming().shift == 'EVENING' &&
+                       isValidMilkCollection(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().receiptNumber == existing().receiptNumber &&
+                       incoming().timestampMillis == existing().timestampMillis &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'date', 'shift', 'farmerId', 'farmerName', 'milkCategory', 'quantity', 'fat', 'snf', 'waterPercentage', 'rate', 'totalAmount', 'machineAmount', 'scannedImageUrl', 'ocrScanned', 'ocrConfidence', 'machineNumber', 'actualTime', 'verifiedBy', 'month', 'year', 'sourceType', 'verificationStatus', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 6. MilkRates Collection
+    match /MilkRates/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'category', 'baseRate', 'baseFat', 'fatMultiplier', 'baseSnf', 'snfMultiplier', 'waterDeductionPerPercent', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'category', 'baseRate', 'baseFat', 'fatMultiplier', 'baseSnf', 'snfMultiplier', 'waterDeductionPerPercent', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidMilkRate(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       isAdmin() &&
+                       isValidMilkRate(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().category == existing().category &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'baseRate', 'baseFat', 'fatMultiplier', 'baseSnf', 'snfMultiplier', 'waterDeductionPerPercent', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 7. Payments Collection
+    match /Payments/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'transactionId', 'farmerId', 'farmerName', 'paymentAmount', 'paymentDate', 'paymentMode', 'paymentType', 'note', 'previousBalance', 'finalBalance', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'transactionId', 'farmerId', 'farmerName', 'paymentAmount', 'paymentDate', 'paymentMode', 'paymentType', 'note', 'previousBalance', 'finalBalance', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidPayment(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidPayment(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().transactionId == existing().transactionId &&
+                       incoming().timestampMillis == existing().timestampMillis &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'farmerId', 'farmerName', 'paymentAmount', 'paymentDate', 'paymentMode', 'paymentType', 'note', 'previousBalance', 'finalBalance', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 8. Expenses Collection
+    match /Expenses/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'expenseId', 'title', 'category', 'amount', 'date', 'paymentMode', 'note', 'recordedBy', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'expenseId', 'title', 'category', 'amount', 'date', 'paymentMode', 'note', 'recordedBy', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidExpense(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidExpense(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().expenseId == existing().expenseId &&
+                       incoming().timestampMillis == existing().timestampMillis &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'title', 'category', 'amount', 'date', 'paymentMode', 'note', 'recordedBy', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 9. DailyReports Collection
+    match /DailyReports/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'date', 'totalWeight', 'totalAmount', 'morningWeight', 'eveningWeight', 'avgFat', 'avgSnf', 'entriesCount', 'totalPaid', 'totalExpenses', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'date', 'totalWeight', 'totalAmount', 'morningWeight', 'eveningWeight', 'avgFat', 'avgSnf', 'entriesCount', 'totalPaid', 'totalExpenses', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidDailyReport(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidDailyReport(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().date == existing().date &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'totalWeight', 'totalAmount', 'morningWeight', 'eveningWeight', 'avgFat', 'avgSnf', 'entriesCount', 'totalPaid', 'totalExpenses', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 10. MonthlyReports Collection
+    match /MonthlyReports/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'yearMonth', 'year', 'month', 'totalWeight', 'totalAmount', 'cowWeight', 'buffaloWeight', 'entriesCount', 'totalPaid', 'totalExpenses', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'yearMonth', 'year', 'month', 'totalWeight', 'totalAmount', 'cowWeight', 'buffaloWeight', 'entriesCount', 'totalPaid', 'totalExpenses', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidMonthlyReport(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidMonthlyReport(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().yearMonth == existing().yearMonth &&
+                       incoming().year == existing().year &&
+                       incoming().month == existing().month &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'totalWeight', 'totalAmount', 'cowWeight', 'buffaloWeight', 'entriesCount', 'totalPaid', 'totalExpenses', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 11. Settings Collection
+    match /Settings/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'dairyName', 'centerName', 'address', 'contactNumber', 'morningStartHour', 'morningStartMinute', 'morningEndHour', 'morningEndMinute', 'eveningStartHour', 'eveningStartMinute', 'eveningEndHour', 'eveningEndMinute', 'amountToleranceRs', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'dairyName', 'centerName', 'address', 'contactNumber', 'morningStartHour', 'morningStartMinute', 'morningEndHour', 'morningEndMinute', 'eveningStartHour', 'eveningStartMinute', 'eveningEndHour', 'eveningEndMinute', 'amountToleranceRs', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidSettings(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       isAdmin() &&
+                       isValidSettings(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().stationId == existing().stationId &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['dairyName', 'centerName', 'address', 'contactNumber', 'morningStartHour', 'morningStartMinute', 'morningEndHour', 'morningEndMinute', 'eveningStartHour', 'eveningStartMinute', 'eveningEndHour', 'eveningEndMinute', 'amountToleranceRs', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && isAdmin();
+    }
+
+    // 12. Notifications Collection
+    match /Notifications/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isTokenAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(docId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'stationId', 'notificationId', 'title', 'message', 'type', 'read', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'stationId', 'notificationId', 'title', 'message', 'type', 'read', 'timestampMillis', 'createdAt', 'updatedAt']) &&
+                       isValidTimestampsCreate(incoming()) &&
+                       isValidNotification(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(docId) &&
+                       (existing().userId == request.auth.uid || isAdmin()) &&
+                       isValidNotification(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().notificationId == existing().notificationId &&
+                       incoming().timestampMillis == existing().timestampMillis &&
+                       isValidTimestampsUpdate(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['stationId', 'title', 'message', 'type', 'read', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(docId) && (existing().userId == request.auth.uid || isAdmin());
+    }
+  }
+}
