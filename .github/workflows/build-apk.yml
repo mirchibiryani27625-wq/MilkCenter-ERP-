@@ -98,8 +98,9 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      # 4. Restore Firebase Configuration (Option A: GOOGLE_SERVICES_JSON_BASE64, Option B: GOOGLE_SERVICES_JSON, or existing file)
+      # 4. Restore Firebase Configuration (Option A: GOOGLE_SERVICES_JSON_BASE64, Option B: GOOGLE_SERVICES_JSON, or local file)
       - name: Restore Firebase Configuration
+        id: restore_firebase
         env:
           GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
           GOOGLE_SERVICES_JSON_RAW: ${{ secrets.GOOGLE_SERVICES_JSON }}
@@ -107,9 +108,10 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_GS_JSON="app/google-services.json"
+          GENERATED_FROM_SECRET="false"
 
           if [ -n "$GOOGLE_SERVICES_JSON_B64" ]; then
-            echo "Option A: Restoring app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret..."
+            echo "Option A: Decoding GOOGLE_SERVICES_JSON_BASE64 secret into $TARGET_GS_JSON..."
             python3 - <<'PY'
           import base64, binascii, json, os, pathlib, re, sys
           raw_b64 = os.environ.get("GOOGLE_SERVICES_JSON_B64", "").strip().strip('"').strip("'").strip()
@@ -128,91 +130,150 @@ jobs:
                   try:
                       decoded_bytes = base64.urlsafe_b64decode(compact_b64)
                   except Exception:
-                      sys.exit("::error::GOOGLE_SERVICES_JSON_BASE64 is not valid Base64.")
-              decoded_text = decoded_bytes.decode("utf-8-sig").strip()
-          parsed = json.loads(decoded_text)
+                      sys.exit("::error::GOOGLE_SERVICES_JSON_BASE64 is not valid Base64. Re-encode with: base64 -w 0 google-services.json")
+              try:
+                  decoded_text = decoded_bytes.decode("utf-8-sig").strip()
+              except UnicodeDecodeError:
+                  sys.exit("::error::Decoded GOOGLE_SERVICES_JSON_BASE64 is not valid UTF-8 text.")
+          try:
+              parsed = json.loads(decoded_text)
+          except json.JSONDecodeError:
+              sys.exit("::error::Decoded GOOGLE_SERVICES_JSON_BASE64 is not valid JSON. Verify the secret value without exposing it.")
           if not isinstance(parsed, dict) or not parsed:
-              sys.exit("::error::Decoded GOOGLE_SERVICES_JSON_BASE64 JSON is empty or invalid.")
-          pathlib.Path("app/google-services.json").write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
-          print("Restored app/google-services.json from GOOGLE_SERVICES_JSON_BASE64.")
+              sys.exit("::error::Decoded GOOGLE_SERVICES_JSON_BASE64 JSON object is empty or invalid.")
+          out_path = pathlib.Path("app/google-services.json")
+          out_path.write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
+          os.chmod(out_path, 0o600)
+          print("Successfully generated app/google-services.json from GOOGLE_SERVICES_JSON_BASE64.")
           PY
+            GENERATED_FROM_SECRET="true"
           elif [ -n "$GOOGLE_SERVICES_JSON_RAW" ]; then
-            echo "Option B: Restoring app/google-services.json from GOOGLE_SERVICES_JSON secret..."
+            echo "Option B: Writing GOOGLE_SERVICES_JSON secret into $TARGET_GS_JSON..."
             python3 - <<'PY'
           import json, os, pathlib, sys
           raw_json = os.environ.get("GOOGLE_SERVICES_JSON_RAW", "").lstrip("\ufeff").strip()
           if not raw_json:
               sys.exit("::error::GOOGLE_SERVICES_JSON secret is empty.")
-          parsed = json.loads(raw_json)
+          try:
+              parsed = json.loads(raw_json)
+          except json.JSONDecodeError:
+              sys.exit("::error::GOOGLE_SERVICES_JSON secret is not valid JSON.")
           if not isinstance(parsed, dict) or not parsed:
-              sys.exit("::error::GOOGLE_SERVICES_JSON is empty or invalid.")
-          pathlib.Path("app/google-services.json").write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
-          print("Restored app/google-services.json from GOOGLE_SERVICES_JSON.")
+              sys.exit("::error::GOOGLE_SERVICES_JSON JSON object is empty or invalid.")
+          out_path = pathlib.Path("app/google-services.json")
+          out_path.write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
+          os.chmod(out_path, 0o600)
+          print("Successfully generated app/google-services.json from GOOGLE_SERVICES_JSON.")
           PY
+            GENERATED_FROM_SECRET="true"
           elif [ -s "$TARGET_GS_JSON" ]; then
-            echo "Using existing app/google-services.json found in repository checkout."
+            echo "Using existing app/google-services.json present in workspace."
           else
             echo "::error::Firebase Configuration Missing: app/google-services.json does not exist, and neither GOOGLE_SERVICES_JSON_BASE64 nor GOOGLE_SERVICES_JSON secret is configured."
-            echo "Solution: Add GOOGLE_SERVICES_JSON_BASE64 (base64 -w 0 app/google-services.json) or GOOGLE_SERVICES_JSON in Repository Settings -> Secrets and variables -> Actions for project 'milkcenter-erp'."
+            echo "How to fix permanently (without committing secrets to Git):"
+            echo "  1. Download real google-services.json from Firebase Console (package: Com.milk.Centre)."
+            echo "  2. Base64 encode it locally: base64 -w 0 google-services.json"
+            echo "  3. Add it in GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret:"
+            echo "     Name: GOOGLE_SERVICES_JSON_BASE64"
+            echo "  4. Re-run this workflow."
             exit 1
           fi
 
-      # 5. Verify Firebase Configuration
-      - name: Verify Firebase Configuration
+          echo "generated_from_secret=$GENERATED_FROM_SECRET" >> "$GITHUB_OUTPUT"
+
+      # 5. Verify Firebase Configuration, Anti-Dummy Guard & Package Name Match
+      - name: Verify Firebase Configuration & Package Name
+        id: verify_firebase
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, pathlib, sys
+          import json, os, pathlib, re, sys
+
           gs_path = pathlib.Path("app/google-services.json")
           if not gs_path.is_file() or gs_path.stat().st_size == 0:
               sys.exit("::error::app/google-services.json is missing or empty.")
 
-          data = json.loads(gs_path.read_text(encoding="utf-8-sig"))
-          pinfo = data.get("project_info", {})
-          pid = pinfo.get("project_id", "")
-          pnum = str(pinfo.get("project_number", ""))
-          if pid != "milkcenter-erp":
-              sys.exit(f"::error::Firebase project_id mismatch: expected 'milkcenter-erp', got '{pid}'.")
-          if pnum != "281167762563":
-              sys.exit(f"::error::Firebase project_number mismatch: expected '281167762563', got '{pnum}'.")
+          try:
+              data = json.loads(gs_path.read_text(encoding="utf-8-sig"))
+          except json.JSONDecodeError:
+              sys.exit("::error::app/google-services.json is not valid JSON.")
+
+          pinfo = data.get("project_info")
+          if not isinstance(pinfo, dict):
+              sys.exit("::error::app/google-services.json missing 'project_info' section.")
+
+          pid = str(pinfo.get("project_id", "")).strip()
+          pnum = str(pinfo.get("project_number", "")).strip()
+          placeholder_tokens = ("dummy", "fake", "placeholder", "remixed-project", "your-project", "example-project", "test-only")
+          if not pid or any(tok in pid.lower() for tok in placeholder_tokens):
+              sys.exit(f"::error::Invalid or placeholder Firebase project_id detected: '{pid}'.")
+          if not pnum.isdigit() or len(pnum) < 6:
+              sys.exit("::error::Invalid or missing Firebase project_number in app/google-services.json.")
 
           gradle_text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
           if "libs.plugins.google.services" not in gradle_text and "com.google.gms.google-services" not in gradle_text:
               sys.exit("::error::Google Services Gradle plugin is not applied in app/build.gradle.kts.")
 
-          print(f"Verified app/google-services.json (project_id={pid}, project_number={pnum}) and Google Services Gradle plugin.")
-          PY
-
-      # 6. Verify Package Name
-      - name: Verify Package Name
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, pathlib, re, sys
-          data = json.loads(pathlib.Path("app/google-services.json").read_text(encoding="utf-8-sig"))
-          expected_pkg = "Com.milk.Centre"
-
-          matched = None
-          for client in data.get("client", []):
-              if client.get("client_info", {}).get("android_client_info", {}).get("package_name") == expected_pkg:
-                  matched = client
-                  break
-          if not matched:
-              sys.exit(f"::error::No Firebase client entry found for '{expected_pkg}'.")
-
-          has_web_client = any(c.get("client_type") == 3 and c.get("client_id") for c in matched.get("oauth_client", []))
-          if not has_web_client:
-              sys.exit("::error::Web OAuth client (client_type == 3) missing; R.string.default_web_client_id will not be generated.")
-
-          gradle_text = pathlib.Path("app/build.gradle.kts").read_text(encoding="utf-8")
           m = re.search(r'applicationId\s*=\s*"([^"]+)"', gradle_text)
           app_id = m.group(1) if m else ""
-          if app_id != expected_pkg:
-              sys.exit(f"::error::Android applicationId mismatch: expected '{expected_pkg}', got '{app_id}'.")
+          if not app_id:
+              sys.exit("::error::Could not determine applicationId from app/build.gradle.kts.")
 
-          print(f"Verified Firebase package_name matches applicationId ({app_id}) and Web OAuth client is present.")
+          clients = data.get("client")
+          if not isinstance(clients, list) or not clients:
+              sys.exit("::error::app/google-services.json has no 'client' entries.")
+
+          matched = None
+          available_pkgs = []
+          for client in clients:
+              pkg = client.get("client_info", {}).get("android_client_info", {}).get("package_name", "")
+              if pkg:
+                  available_pkgs.append(pkg)
+              if pkg == app_id:
+                  matched = client
+                  break
+
+          if not matched:
+              sys.exit(
+                  f"::error::Firebase package_name mismatch! Android applicationId is '{app_id}', "
+                  f"but app/google-services.json only contains: {available_pkgs}."
+              )
+
+          mobilesdk_id = str(matched.get("client_info", {}).get("mobilesdk_app_id", "")).strip()
+          if not mobilesdk_id.startswith(f"1:{pnum}:android:"):
+              sys.exit("::error::Invalid mobilesdk_app_id format in app/google-services.json.")
+
+          api_keys = matched.get("api_key", [])
+          has_api_key = any(
+              isinstance(k, dict)
+              and str(k.get("current_key", "")).strip()
+              and not any(tok in str(k.get("current_key", "")).lower() for tok in placeholder_tokens)
+              for k in api_keys
+          )
+          if not has_api_key:
+              sys.exit("::error::Valid Firebase api_key missing in app/google-services.json.")
+
+          has_web_client = any(
+              isinstance(c, dict) and c.get("client_type") == 3 and str(c.get("client_id", "")).strip()
+              for c in matched.get("oauth_client", [])
+          )
+          if not has_web_client:
+              sys.exit(
+                  "::error::Web OAuth client (client_type == 3) missing in app/google-services.json; "
+                  "R.string.default_web_client_id will not be generated for Google Sign-In."
+              )
+
+          gh_out = os.environ.get("GITHUB_OUTPUT")
+          if gh_out:
+              with open(gh_out, "a", encoding="utf-8") as fh:
+                  fh.write(f"project_id={pid}\n")
+                  fh.write(f"application_id={app_id}\n")
+
+          print(
+              f"Verified app/google-services.json: project_id={pid}, project_number={pnum}, "
+              f"package_name={app_id}, Google Services plugin active, Web OAuth client present."
+          )
           PY
 
       # Prepare Signing Keystores (never log secrets)
@@ -354,7 +415,13 @@ jobs:
             IS_TAG_REF="false"
           fi
 
-          "$GRADLE_CMD" assembleRelease --no-daemon
+          "$GRADLE_CMD" :app:processReleaseGoogleServices assembleRelease --no-daemon
+
+          REL_GS_VALUES="app/build/generated/res/processReleaseGoogleServices/values/values.xml"
+          if [ ! -f "$REL_GS_VALUES" ] || ! grep -q 'name="default_web_client_id"' "$REL_GS_VALUES"; then
+            echo "::error::R.string.default_web_client_id was not generated in $REL_GS_VALUES"
+            exit 1
+          fi
 
           RAW_RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
           if [ ! -f "$RAW_RELEASE_APK" ] || [ ! -s "$RAW_RELEASE_APK" ]; then
@@ -377,11 +444,12 @@ jobs:
           cp "${{ steps.build_debug.outputs.debug_apk_path }}" "$FINAL_DEBUG_APK"
           cp "${{ steps.build_debug.outputs.debug_apk_path }}" "$STABLE_DEBUG_APK"
 
-          python3 - <<PY
+          SOURCE_ZIP_PATH="$SOURCE_ZIP_PATH" python3 - <<'PY'
           import os, zipfile
-          out_zip = r"$SOURCE_ZIP_PATH"
+          out_zip = os.environ["SOURCE_ZIP_PATH"]
           exclude_dirs = {".git", ".gradle", ".kotlin", "build", ".build-outputs", ".aistudio", "public", "node_modules"}
           exclude_files = {"local.properties", ".env", "debug.keystore", "google-services.json"}
+          exclude_exts = (".jks", ".keystore")
           with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
               for dirpath, dirnames, filenames in os.walk("."):
                   rel_dir = os.path.relpath(dirpath, ".")
@@ -391,7 +459,8 @@ jobs:
                       if d not in exclude_dirs and not (parts == ["app"] and d == "build")
                   ]
                   for f in sorted(filenames):
-                      if f in exclude_files:
+                      fl = f.lower()
+                      if f in exclude_files or fl.endswith(exclude_exts) or (fl.startswith("google-services") and fl.endswith(".json")):
                           continue
                       full_path = os.path.join(dirpath, f)
                       zf.write(full_path, os.path.relpath(full_path, "."))
@@ -480,10 +549,13 @@ jobs:
           DBG_BYTES="${{ steps.build_debug.outputs.debug_bytes }}"
           ZIP_KB="${{ steps.build_release.outputs.source_zip_kb }}"
 
+          FIREBASE_PID="${{ steps.verify_firebase.outputs.project_id }}"
+          APP_ID="${{ steps.verify_firebase.outputs.application_id }}"
+
           RELEASE_NOTES=$(cat <<EOF
           ## MilkCenter ERP (${RELEASE_TAG})
 
-          Connected to Firebase Project \`milkcenter-erp\` (\`Com.milk.Centre\`).
+          Connected to Firebase Project \`${FIREBASE_PID}\` (\`${APP_ID}\`).
 
           - **Debug APK (Direct):** \`${STABLE_DBG_NAME}\` (${DBG_MB} MB / ${DBG_BYTES} bytes)
           - **Signed Release APK:** \`${REL_NAME}\` (${REL_MB} MB / ${REL_BYTES} bytes)
@@ -519,11 +591,21 @@ jobs:
             echo ""
             echo "| Detail | Value |"
             echo "| --- | --- |"
-            echo "| **Firebase Project** | \`milkcenter-erp\` |"
-            echo "| **Application ID** | \`Com.milk.Centre\` |"
+            echo "| **Firebase Project** | \`${FIREBASE_PID}\` |"
+            echo "| **Application ID** | \`${APP_ID}\` |"
             echo "| **Release Tag** | \`${RELEASE_TAG}\` |"
             echo "| **GitHub Release Page** | ${RELEASE_PAGE_URL} |"
             echo "| **Debug APK Download** | [${STABLE_DBG_NAME}](${STABLE_DBG_URL}) (${DBG_MB} MB) |"
             echo "| **Signed Release APK** | [${REL_NAME}](${REL_DOWNLOAD_URL}) (${REL_MB} MB) |"
             echo "| **Source Code ZIP** | [${SRC_ZIP_NAME}](${SRC_ZIP_URL}) (${ZIP_KB} KB) |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 14. Always Clean Up Secret-Generated Files
+      - name: Cleanup Sensitive Build Files
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.restore_firebase.outputs.generated_from_secret }}" = "true" ]; then
+            rm -f app/google-services.json
+          fi
+          rm -f "${{ runner.temp }}/release-keystore.jks" "${{ runner.temp }}/ci-release-keystore.jks"
